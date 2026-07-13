@@ -3672,7 +3672,7 @@ def reiniciar_juego():
 MAXIMO_SLOTS       = 27 # slots disponibles en el almacén del mercado
 CAPACIDAD_INVENTARIO = 7  # lotes máximos que puede cargar el personaje a la vez
 
-def obtener_elementos_en_venta(debug=False, max_intentos=3):
+def obtener_elementos_en_venta(max_intentos=3):
     def _ocr_region(region, zoom=3, whitelist=True):
         ss = heart.screenshot(region=region)
         raw = cv2.cvtColor(np.array(ss), cv2.COLOR_RGB2GRAY)
@@ -3684,9 +3684,6 @@ def obtener_elementos_en_venta(debug=False, max_intentos=3):
     for intento in range(max_intentos):
         texto, img_raw, img_proc = _ocr_region((505, 283, 120, 36), whitelist=True)
         print(f"[OCR] texto leído (intento {intento+1}): '{texto.strip()}'")
-        if debug and intento == 0:
-            cv2.imwrite(os.path.join(_DIR, "debug_titulo.png"), img_proc)
-            cv2.imwrite(os.path.join(_DIR, "debug_titulo_raw.png"), img_raw)
         m = re.search(r'\(?(\d{1,2})/', texto)
         if not m:
             # fallback región amplia — también con whitelist
@@ -3719,12 +3716,19 @@ def _cambiar_mapa(click_x, click_y, nombre, check_fn, max_intentos=4, timeout=15
     return False
 
 def _esperar_mapa(nombre, check_fn, timeout=15):
+    """Espera a que check_fn() sea verdadero. Al detectarlo, vuelve a
+    confirmar tras una breve espera (debounce) para descartar falsos
+    positivos de un frame de transición (ej. animación al entrar a un
+    edificio) que cambia de color antes de estabilizarse."""
     t0 = time.time()
     while True:
         recnec()
         if check_fn():
-            print(f"[ir_mercado] mapa detectado: {nombre}")
-            return True
+            time.sleep(0.5)
+            if check_fn():
+                print(f"[ir_mercado] mapa detectado: {nombre}")
+                return True
+            print(f"[ir_mercado] {nombre}: detección transitoria descartada — reintentando...")
         if time.time() - t0 > timeout:
             print(f"[ir_mercado] ⚠️ timeout esperando {nombre} ({timeout}s)")
             for x, y in [(700,430),(950,220),(700,480),(600,500),(750,350)]:
@@ -3741,18 +3745,123 @@ def _es_mapa2():
             and heart.pixelMatchesColor(700, 480, (130, 120,  90), tolerance=30))
 
 def _es_mapa3():
-    return (heart.pixelMatchesColor(700, 430, (100,  67,  25), tolerance=20)
-            and heart.pixelMatchesColor(700, 480, ( 69,  59,  30), tolerance=20))
+    # Calibración original (zona oscura del mercado)
+    caso1 = (heart.pixelMatchesColor(700, 430, (100,  67,  25), tolerance=20)
+             and heart.pixelMatchesColor(700, 480, ( 69,  59,  30), tolerance=20))
+    # Observado tras cerrar la ventana de comercio con escape (suelo beige + vegetación)
+    caso2 = (heart.pixelMatchesColor(700, 430, (213, 207, 170), tolerance=15)
+             and heart.pixelMatchesColor(700, 480, (213, 207, 170), tolerance=15)
+             and heart.pixelMatchesColor(950, 220, (117, 150,  70), tolerance=15))
+    return caso1 or caso2
 
 def _lista_vacia():
     return heart.pixelMatchesColor(355, 395, (180, 172, 141), tolerance=15)
 
+def _vaciar_inventario_en_banco(cantidad_items=None):
+    """
+    Estando en mapa1, abre el banco y deposita todos los minerales del inventario.
+
+    El inventario del personaje se auto-compacta: al depositar el mineral
+    que ocupa el slot de referencia (1045,371), el siguiente mineral (si lo
+    hay) se corre automáticamente a esa misma posición. Por eso NO hace
+    falta recorrer varios slots — basta con repetir el Ctrl+Doble-Click
+    sobre esa única posición hasta que quede vacía de verdad.
+
+    cantidad_items: cantidad de minerales retirados (si se conoce), usada
+    solo para dimensionar el margen de intentos totales. Si es None se usa
+    un margen genérico.
+
+    Offsets relativos derivados del slot de referencia (1045,371):
+      (1056,369) → (+11,-2)
+      (1053,357) → (+8,-14)
+      (1054,377) → (+9,+6)
+    """
+    print("[depositar] abriendo banco para vaciar inventario...")
+    abrir_banco()
+    time.sleep(1.0)
+    heart.click(1099, 303)   # ver inventario del personaje dentro del banco
+    time.sleep(1)
+
+    SX, SY = 1045, 371
+    CHECK  = [(11, -2), (8, -14), (9, 6)]
+    MAX_INTENTOS = (cantidad_items if cantidad_items is not None else 15) * 3 + 2
+
+    heart.moveTo(SX, SY, duration=0.1)
+    time.sleep(0.2)
+
+    intentos = 0
+    while intentos < MAX_INTENTOS and (
+        not heart.pixelMatchesColor(SX + CHECK[0][0], SY + CHECK[0][1], (190, 185, 152), tolerance=15) or
+        not heart.pixelMatchesColor(SX + CHECK[1][0], SY + CHECK[1][1], (190, 185, 152), tolerance=15) or
+        not heart.pixelMatchesColor(SX + CHECK[2][0], SY + CHECK[2][1], (190, 185, 152), tolerance=15)
+    ):
+        intentos += 1
+        print(f"[depositar] intento {intentos}/{MAX_INTENTOS} — ctrl+doble-click en ({SX},{SY})...")
+        time.sleep(0.4)
+        heart.keyDown('ctrl')
+        heart.click(clicks=2, interval=0.1)
+        heart.keyUp('ctrl')
+
+    if intentos == 0:
+        print("[depositar] inventario ya estaba vacío")
+    elif intentos >= MAX_INTENTOS:
+        print(f"[depositar] ⚠️ no se pudo confirmar inventario vacío tras {MAX_INTENTOS} intentos")
+    else:
+        print(f"[depositar] ✅ inventario vaciado en {intentos} intento(s)")
+
+    print("[depositar] cerrando banco")
+    heart.press('escape')
+    time.sleep(0.5)
+
+def _vaciar_banco_y_reabrir_comercio(cantidad_items=None):
+    """
+    Se llama cuando retirar_minerales() alcanza el límite de capacidad del
+    inventario (CAPACIDAD_INVENTARIO + 1 retiradas) antes de vaciar la lista
+    de venta. Aísla todo el ciclo: cerrar la ventana de comercio (implícito
+    en _ir_banco_venta), ir al banco, depositar el inventario y volver al
+    mercado con la ventana de comercio reabierta, lista para que
+    retirar_minerales() continúe donde quedó.
+
+    cantidad_items: cantidad de minerales realmente retirados (se pasa a
+    _vaciar_inventario_en_banco para dimensionar el margen de intentos).
+
+    Retorna True si el ciclo completo tuvo éxito, False si se quedó
+    atascado en algún paso (navegación al banco o de vuelta al mercado).
+    """
+    print("[límite] inventario cerca del límite — cerrando comercio para ir al banco")
+    if not _ir_banco_venta():
+        print("[límite] ⚠️ no se pudo llegar al banco")
+        return False
+
+    _vaciar_inventario_en_banco(cantidad_items)
+
+    print("[límite] volviendo al mercado para continuar retirada")
+    if not _navegar_a_mercado():
+        print("[límite] ⚠️ no se pudo volver al mercado")
+        return False
+
+    time.sleep(0.5)
+    heart.click(525, 464)
+    time.sleep(0.5)
+    heart.click(568, 504)
+    time.sleep(2)
+    return True
+
 def retirar_minerales():
+    """Retira todos los minerales de los slots de venta.
+    Retorna (True, retirados) si la lista quedó vacía, (False, retirados)
+    si el inventario alcanzó el límite de capacidad antes de vaciar la lista
+    (conteo de retiradas). El conteo de retirados se usa luego para saber
+    cuántos intentos hacen falta al vaciar en el banco."""
     X_MINERAL, Y_MINERAL = 358, 401
     X_RETIRAR, Y_RETIRAR = 385, 633
+    LIMITE_RETIRADAS = CAPACIDAD_INVENTARIO + 1
     retirados = 0
     print("[retirar] iniciando retirada hasta lista vacía...")
     while not _lista_vacia():
+        if retirados >= LIMITE_RETIRADAS:
+            print(f"[retirar] ⚠️ límite de inventario alcanzado ({retirados}/{LIMITE_RETIRADAS} retiradas) — pausando")
+            return False, retirados
         heart.click(X_MINERAL, Y_MINERAL)
         time.sleep(0.5)
         heart.click(X_RETIRAR, Y_RETIRAR)
@@ -3760,8 +3869,9 @@ def retirar_minerales():
         retirados += 1
         print(f"[retirar] {retirados} retirado(s) — verificando lista...")
     print(f"[retirar] ✅ lista vacía tras {retirados} retirada(s)")
+    return True, retirados
 
-def leer_inventario(debug=False):
+def leer_inventario():
     region = (1009, 379, 251, 234)
     heart.click(1117, 338)
     time.sleep(0.5)
@@ -3769,10 +3879,6 @@ def leer_inventario(debug=False):
     img_raw = cv2.cvtColor(np.array(ss), cv2.COLOR_RGB2GRAY)
     img = cv2.resize(img_raw, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
     _, img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    if debug:
-        cv2.imwrite(os.path.join(_DIR, "debug_inventario.png"), img)
-        cv2.imwrite(os.path.join(_DIR, "debug_inventario_raw.png"), img_raw)
-        print("[inventario] imágenes debug guardadas")
     texto = pytesseract.image_to_string(img, config='--psm 6')
     print(f"[inventario] texto leído:\n{texto.strip()}")
     minerales = {}
@@ -3802,9 +3908,15 @@ def vender_mineral(nombre, lotes):
     print(f"[vender] {nombre}: {lotes} lote(s) de 100")
     heart.click(1177, 393)
     time.sleep(1)
-    precio_base = leer_precio_actual()
+    precio_base = None
+    for intento in range(1, 4):
+        precio_base = leer_precio_actual()
+        if precio_base is not None:
+            break
+        print(f"[vender] {nombre}: precio no leído (intento {intento}/3) — reintentando...")
+        time.sleep(1)
     if precio_base is None:
-        print(f"[vender] ⚠️ precio no leído — abortando {nombre}")
+        print(f"[vender] ⚠️ precio no leído tras 3 intentos — abortando {nombre}")
         return False
     nuevo_precio = precio_base - 1
     print(f"[vender] precio base: {precio_base} → {nuevo_precio} (fijo para todos los lotes)")
@@ -3861,7 +3973,7 @@ def _ir_banco_venta():
         if _es_mapa2():
             print(f"[ir_banco_venta] ciclo {ciclo+1}: en mapa exterior → yendo al banco")
             _cambiar_mapa(844, 341, "banco/sala interior", _es_mapa1)
-            time.sleep(0.5)
+            time.sleep(1.5)   # margen extra: entrar al edificio tarda más en estabilizarse
             continue
         # Mapa no reconocido — esperar un momento y reintentar
         print(f"[ir_banco_venta] ciclo {ciclo+1}: mapa no reconocido — esperando...")
@@ -4137,7 +4249,7 @@ def _abrir_ventana_comercio():
     time.sleep(0.5)
     heart.click(568, 504)
     time.sleep(2)
-    en_venta, maximo, espacios = obtener_elementos_en_venta(debug=False)
+    en_venta, maximo, espacios = obtener_elementos_en_venta()
     if en_venta is None:
         print("[mercado] ⚠️ no se pudo leer el contador de elementos")
         return None
@@ -4169,9 +4281,15 @@ def ir_mercado():
 
     if espacios < MAXIMO_SLOTS:
         print(f"[ir_mercado] hay minerales sin vender — retirando todos")
-        retirar_minerales()
+        ok, retirados = retirar_minerales()
+        while not ok:
+            print("[ir_mercado] inventario lleno durante retirada — yendo al banco a depositar")
+            if not _vaciar_banco_y_reabrir_comercio(retirados):
+                print("[ir_mercado] ⚠️ no se pudo completar el ciclo banco→mercado")
+                break
+            ok, retirados = retirar_minerales()
 
-    inv = leer_inventario(debug=True)
+    inv = leer_inventario()
     if inv:
         print(f"[ir_mercado] inventario: {inv}")
         poner_todos_en_venta(inv)
@@ -4186,7 +4304,7 @@ def ir_mercado():
     while True:
         # Ventana ya está abierta — leer OCR directamente
         time.sleep(4)  # dar tiempo al servidor para registrar la venta
-        en_venta, _, espacios = obtener_elementos_en_venta(debug=False)
+        en_venta, _, espacios = obtener_elementos_en_venta()
         if en_venta is None:
             print("[ir_mercado] ⚠️ OCR falló — terminando")
             break
@@ -4222,7 +4340,7 @@ def ir_mercado():
         heart.click(568, 504)
         time.sleep(2)
 
-        inv = leer_inventario(debug=False)
+        inv = leer_inventario()
         if inv:
             print(f"[ir_mercado] poniendo en venta: {inv}")
             poner_todos_en_venta(inv)
