@@ -4147,8 +4147,9 @@ def abrir_banco():
 
 def sacar_minerales_banco(espacios_libres):
     abrir_banco()
-    lotes_restantes = min(espacios_libres, CAPACIDAD_INVENTARIO)
-    print(f"[banco] espacios libres: {espacios_libres} — extrayendo máx {lotes_restantes} lote(s) (capacidad inventario={CAPACIDAD_INVENTARIO})")
+    lotes_a_traer = min(espacios_libres, CAPACIDAD_INVENTARIO)
+    lotes_restantes = lotes_a_traer
+    print(f"[banco] espacios libres: {espacios_libres} — extrayendo máx {lotes_a_traer} lote(s) (capacidad inventario={CAPACIDAD_INVENTARIO})")
 
     # Detectar todos los minerales de una sola captura
     ss       = heart.screenshot(region=REGION_BANCO)
@@ -4197,7 +4198,12 @@ def sacar_minerales_banco(espacios_libres):
         except Exception as e:
             print(f"[banco] ⚠️ error extrayendo {nombre_display}: {e}")
 
-    print(f"[banco] ✅ extracción completa — {espacios_libres - lotes_restantes} lote(s) extraídos")
+    extraidos  = lotes_a_traer - lotes_restantes
+    faltantes  = espacios_libres - lotes_a_traer
+    msg = f"[banco] ✅ extracción completa — {extraidos} lote(s) extraídos"
+    if faltantes > 0:
+        msg += f" — quedan {faltantes} lote(s) faltantes por capacidad de inventario (otro viaje)"
+    print(msg)
     heart.press('escape')
     time.sleep(0.5)
 
